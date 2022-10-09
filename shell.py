@@ -2,7 +2,6 @@ import basic
 
 while True:
     text = input("mozhi > ")
-
     if text == "exit()":
         break
 
