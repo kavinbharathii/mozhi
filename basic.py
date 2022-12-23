@@ -5,6 +5,8 @@ from utils import arrow_string
 # ---------------------------- CONSTS ---------------------------- # 
 
 DIGITS = "0123456789"
+LETTERS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+LETTERS_DIGITS = LETTERS + DIGITS
 
 # ---------------------------- ERRORS ---------------------------- # 
 
@@ -25,7 +27,7 @@ class IllegalCharError(Error):
     def __init__(self, pos_start, pos_end, details):
         super().__init__(pos_start, pos_end, "Illegal Charecter", details)
 
-class IllegalSyntaxError(Error):
+class InvalidSyntaxError(Error):
     def __init__(self, pos_start, pos_end, details=""):
         super().__init__(pos_start, pos_end, "Illegal Syntax", details)
 
@@ -87,6 +89,13 @@ TT_EXP = "EXP"
 TT_LPAREN = "LPAREN" 
 TT_RPAREN = "RPAREN"
 TT_EOF = "EOF"
+TT_IDENTIFIER = "IDENTIFIER"
+TT_KEYWORD ="KEYWORD"
+TT_EQ = "EQ"
+
+KEYWORDS = [
+    "var"
+]
 
 class Token:
     def __init__(self, type_, value = None, pos_start = None, pos_end = None):
@@ -100,6 +109,9 @@ class Token:
 
         if pos_end:
             self.pos_end = pos_end
+
+    def matches(self, type_, value):
+        return self.type == type_ and self.value == value
 
     def __repr__(self):
         if self.value: return f"{self.type}:{self.value}"
@@ -128,6 +140,8 @@ class Lexer:
                 self.advance()
             elif self.current_char in DIGITS:
                 tokens.append(self.make_number())
+            elif self.current_char in LETTERS:
+                tokens.append(self.make_identifier())
             elif self.current_char == '+':
                 tokens.append(Token(TT_PLUS, pos_start = self.pos))
                 self.advance()
@@ -142,6 +156,9 @@ class Lexer:
                 self.advance()
             elif self.current_char == '^':
                 tokens.append(Token(TT_EXP, pos_start = self.pos))
+                self.advance()
+            elif self.current_char == '=':
+                tokens.append(Token(TT_EQ, pos_start = self.pos))
                 self.advance()
             elif self.current_char == '(':
                 tokens.append(Token(TT_LPAREN, pos_start = self.pos))
@@ -178,6 +195,18 @@ class Lexer:
         else:
             return Token(TT_FLOAT, float(num_str), pos_start, self.pos)
 
+    def make_identifier(self):
+        id_str = ''
+        pos_start = self.pos.copy()
+
+        while self.current_char != None and self.current_char in LETTERS_DIGITS + "_":
+            id_str += self.current_char
+            self.advance()
+
+        tok_type = TT_KEYWORD if id_str in KEYWORDS else TT_IDENTIFIER
+        return Token(tok_type, id_str, pos_start, self.pos)
+
+
 # ----------------------------  NODES  ---------------------------- # 
 
 class NumberNode:
@@ -188,6 +217,20 @@ class NumberNode:
     
     def __repr__(self):
         return f"{self.tok}"
+
+class VarAccessNode:
+    def __init__(self, var_name_tok):
+        self.var_name_tok = var_name_tok
+        self.pos_start = var_name_tok.pos_start
+        self.pos_end = var_name_tok.pos_end
+
+class VarAssignNode:
+    def __init__(self, var_name_tok, value_node):
+        self.var_name_tok = var_name_tok
+        self.value_node = value_node
+
+        self.pos_start = var_name_tok.pos_start
+        self.pos_end = value_node.pos_end
 
 
 class BinaryOpNode:
@@ -252,7 +295,7 @@ class Parser:
     def parse(self):
         res = self.expr()
         if not res.error and self.current_tok.type != TT_EOF: 
-            return res.failure(IllegalSyntaxError(
+            return res.failure(InvalidSyntaxError(
                 self.current_tok.pos_start, self.current_tok.pos_end,
                 "Expected '+', '-', '*' or '/'"
             ))
@@ -266,6 +309,10 @@ class Parser:
             res.register(self.advance())
             return res.success(NumberNode(tok))
 
+        elif tok.type == TT_IDENTIFIER:
+            res.register(self.advance())
+            return res.success(VarAccessNode(tok))
+
         elif tok.type == TT_LPAREN:
             res.register(self.advance())
             expr = res.register(self.expr())
@@ -274,12 +321,12 @@ class Parser:
                 res.register(self.advance())
                 return res.success(expr)
             else:
-                res.failure(IllegalSyntaxError(
+                res.failure(InvalidSyntaxError(
                     self.current_tok.pos_start, self.current_tok.pos_end,
                     "Expected ')'"
                 ))
 
-        return res.failure(IllegalSyntaxError(
+        return res.failure(InvalidSyntaxError(
             tok.pos_start, tok.pos_end,
             "Expected int, float, '+', '-', or '('"
         ))
@@ -300,12 +347,34 @@ class Parser:
         return self.power()
 
     def term(self):
-        x = self.bin_op(self.factor, (TT_MULT, TT_DIV))
-        return x
+        return self.bin_op(self.factor, (TT_MULT, TT_DIV))
 
     def expr(self):
-        x = self.bin_op(self.term, (TT_PLUS, TT_MINUS))
-        return x
+        res = ParseResult()
+        if self.current_tok.matches(TT_KEYWORD, 'var'):
+            res.register(self.advance())
+
+            if self.current_tok.type != TT_IDENTIFIER:
+                return res.failure(InvalidSyntaxError(
+                    self.current_tok.pos_start, self.current_tok.pos_end,
+                    "Expected Identifier"
+                ))
+
+            var_name = self.current_tok
+            res.register(self.advance())
+
+            if self.current_tok.type != TT_EQ:
+                return res.failure(InvalidSyntaxError(
+                    self.current_tok.pos_start, self.current_tok.pos_end,
+                    "Expected '='"
+                ))
+
+            res.register(self.advance())
+            expr = res.register(self.expr())
+            if res.error: return res
+            return res.success(VarAssignNode(var_name, expr))
+
+        return self.bin_op(self.term, (TT_PLUS, TT_MINUS))
 
     def bin_op(self, func_a, ops, func_b = None):
         if func_b == None:
@@ -395,6 +464,15 @@ class Context:
         self.display_name = display_name
         self.parent = parent
         self.parent_entry_pos = parent_entry_pos
+
+# ----------------------------  SYMBOL TABLE  ---------------------------- # 
+
+class SymbolTable:
+    def __init__(self):
+        self.symbols = {}
+        self.parent = None
+
+    
 
 
 # ----------------------------  INTERPRETER  ---------------------------- # 
